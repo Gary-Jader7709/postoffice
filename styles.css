@@ -65,8 +65,18 @@ h2 { margin: 0 0 10px; font-size: 16px; }
   padding: 10px;
   margin-top: 10px;
 }
+
+/* 更改地址標題大小，並在後面加上聲調符號以利辨識。 */
+#result .item > div:first-child b {
+  font-size: 16px;  /* 地址標題大小 */
+}
+#result .item .muted {
+  font-size: 13px;  /* 廂號/來源等副文字大小 */
+}
+
 .list .rowItem {
-  display:flex; justify-content:space-between; gap:10px;
+  display:flex; justify-content:space-between; 
+  gap:10px;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px;
