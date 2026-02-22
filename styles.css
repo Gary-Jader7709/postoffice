@@ -66,12 +66,70 @@ h2 { margin: 0 0 10px; font-size: 16px; }
   margin-top: 10px;
 }
 
-/* 更改地址標題大小，並在後面加上聲調符號以利辨識。 */
-#result .item > div:first-child b {
-  font-size: 16px;  /* 地址標題大小 */
+/* ===== 新版結果卡：左方框廂號｜右側姓名+地址（標題）｜下方備註/來源（副標題） ===== */
+.resultCard {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 10px;
+  align-items: stretch;
 }
-#result .item .muted {
-  font-size: 13px;  /* 廂號/來源等副文字大小 */
+.boxBadge {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight: 800;
+  font-size: 28px;
+  min-height: 78px;
+  background: rgba(255,255,255,0.03);
+}
+.cardMain .title {
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.cardMain .title + .title { margin-top: 4px; }
+.cardMain .sub {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.cardActions {
+  margin-top: 10px;
+  display:flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ===== Modal ===== */
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 50;
+}
+.modalBackdrop.show { display: flex; }
+.modal {
+  width: min(720px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+}
+.modal h3 { margin: 0 0 10px; font-size: 16px; }
+.modal .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.modal .help { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+@media (max-width: 520px) {
+  .resultCard { grid-template-columns: 64px 1fr; }
+  .boxBadge { min-height: 64px; font-size: 24px; }
+  .modal .grid2 { grid-template-columns: 1fr; }
 }
 
 .list .rowItem {

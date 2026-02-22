@@ -3,80 +3,57 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>廂號查詢</title>
+  <title>郵局廂號查詢</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div>
-      <h1>地址 → 廂號</h1>
-      <div class="muted">底庫 + 自建資料（localStorage）</div>
+      <h1>郵局廂號查詢</h1>
+      <div class="muted">Supabase（Postgres）｜查詢公開、編輯需通關碼</div>
     </div>
-    <button id="themeBtn" class="btn">切換深/淺色</button>
+    <div class="row" style="gap:8px; justify-content:flex-end;">
+      <button id="editModeBtn" class="btn">編輯模式：未解鎖</button>
+      <button id="themeBtn" class="btn">切換深/淺色</button>
+    </div>
   </header>
 
   <main class="grid">
     <!-- 查詢 -->
-    <section class="card">
+    <section class="card span2">
       <h2>查詢</h2>
-      <!-- 查詢模式切換 -->
-<div class="row" style="margin-bottom:8px;">
-  <button id="modeAddr" class="btn primary" type="button">地址查廂號</button>
-  <button id="modeBox" class="btn" type="button">廂號查地址</button>
-</div>
 
-<!-- 查詢輸入 -->
-<input id="q" class="input" placeholder="地址查廂號：例 中山路123號2樓 / 太子R200L79A32F2" />
-
-<div class="row">
-  <button id="searchBtn" class="btn primary" type="button">查詢</button>
-  <button id="clearBtn" class="btn" type="button">清空</button>
-</div>
-
-<div id="status" class="muted"></div>
-<div id="result"></div>
-</section>
-
-
-    <!-- 新增 -->
-    <section class="card">
-      <h2>新增資料（自建）</h2>
-      <div class="muted">新增後會存到此台電腦的瀏覽器；不影響底庫檔案。</div>
-
-      <label class="label">地址（可直接貼整段）</label>
-      <input id="addAddr" class="input" placeholder="例：中山路123號2樓" />
-
-      <div class="row">
-        <div>
-          <label class="label">廂號</label>
-          <input id="addBox" class="input" placeholder="例：240" />
-        </div>
-        <div>
-          <label class="label">備註</label>
-          <input id="addNote" class="input" placeholder="可空" />
-        </div>
+      <div class="row" style="margin-bottom:8px;">
+        <button id="modeAll" class="btn primary" type="button">全欄位</button>
+        <button id="modeAddr" class="btn" type="button">只查地址</button>
+        <button id="modeBox" class="btn" type="button">只查廂號</button>
+        <button id="modeBorrower" class="btn" type="button">只查姓名/公司</button>
       </div>
 
-      <button id="addBtn" class="btn primary">新增</button>
-      <div id="addMsg" class="muted"></div>
+      <input id="q" class="input" placeholder="例：新進路 王小明（可用空格分詞）／ 37" />
+
+      <div class="row">
+        <button id="searchBtn" class="btn primary" type="button">查詢</button>
+        <button id="clearBtn" class="btn" type="button">清空</button>
+        <button id="newBtn" class="btn" type="button" style="margin-left:auto; display:none;">＋新增</button>
+      </div>
+
+      <div id="status" class="muted"></div>
+      <div id="result"></div>
     </section>
 
-    <!-- 管理自建資料 -->
-    <section class="card span2">
-      <h2>自建資料管理</h2>
-      <div class="row">
-        <button id="exportBtn" class="btn">匯出 JSON</button>
-        <label class="btn file">
-          匯入 JSON
-          <input id="importFile" type="file" accept="application/json" hidden />
-        </label>
-        <button id="wipeBtn" class="btn danger">清空自建資料</button>
+    <!-- 備份 / 還原提示 -->
+    <section class="card">
+      <h2>備份 / 還原</h2>
+      <div class="muted">
+        已開啟修改紀錄（C2）。如果不小心改錯，可以在 Supabase 看到歷史紀錄表，再手動還原。
       </div>
-
-      <div id="customList" class="list"></div>
+      <div class="muted" style="margin-top:8px;">
+        小提醒：你用的是通關碼（P1），通關碼會在 Supabase 的 RPC 驗證；不要把通關碼寫進 GitHub 公開程式碼。
+      </div>
     </section>
   </main>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

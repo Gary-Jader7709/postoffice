@@ -1,572 +1,456 @@
-const DATA_URL = "./data/clean_dataset.json";
-const LS_KEY = "gearpage_custom_records_v2";
-const THEME_KEY = "gearpage_theme_v1";
+// app.js (ES module)
+// 需要 Supabase：這裡用 ESM CDN（避免 script tag 全域變數問題）
+// 來源：Supabase 官方建議可用 CDN；esm.sh 是常見的無打包方案。
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-// ========= utils =========
-function norm(s) {
-  if (s === null || s === undefined) return "";
-  return String(s)
-    .trim()
-    .replace(/\s+/g, "")
-    .replace(/臺/g, "台")
-    .replace(/号/g, "號");
+// ====== 1) 你要改這兩個（Supabase 專案 Settings → API 可拿到） ======
+const SUPABASE_URL = 'https://nwxoduqhgjmseosgweqj.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_wF1Vq7wOdv2EOQUPWSULcA_MtAhFf7X';
+
+// 你的 Postgres RPC 函式名稱（下面我給你 SQL 直接貼進 Supabase）
+const RPC_SEARCH = 'search_mailboxes';
+const RPC_UPDATE = 'update_mailbox';
+const RPC_INSERT = 'insert_mailbox';
+
+// ====== 2) localStorage keys ======
+const THEME_KEY = 'po_theme_v1';
+const UNLOCK_KEY = 'po_edit_unlocked_v1';
+const PASS_KEY = 'po_edit_pass_v1'; // ⚠️ 只給你媽用、單一裝置：才建議記住
+
+// ====== 3) init ======
+if (!SUPABASE_URL.startsWith('http')) {
+  console.warn('你還沒填 SUPABASE_URL / SUPABASE_ANON_KEY');
 }
 
-function expandAbbr(s) {
-  let t = norm(s);
-  t = t.replace(/ST|st/g, "街");
-  t = t.replace(/R/g, "路");
-  t = t.replace(/L/g, "巷");
-  t = t.replace(/A/g, "弄");
-  t = t.replace(/F/g, "樓");
-  t = t.replace(/NO:(\d+)/g, "$1號");
-  return t;
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ====== 4) DOM helpers ======
+const el = (id) => document.getElementById(id);
+const statusEl = el('status');
+const resultEl = el('result');
+const qEl = el('q');
+const editModeBtn = el('editModeBtn');
+const themeBtn = el('themeBtn');
+const newBtn = el('newBtn');
+
+// search mode: all | addr | box | borrower
+let SEARCH_MODE = 'all';
+let EDIT_UNLOCKED = false;
+
+function setStatus(msg) {
+  statusEl.textContent = msg || '';
 }
 
-function stripRoadSuffix(s) {
-  return norm(s).replace(/(路|街|大道|段)$/g, "");
+function normInput(s) {
+  return String(s ?? '').trim();
 }
 
-// 解析「使用者輸入的地址字串」用（用來做精準/半精準 key）
-function parseAddress(input) {
-  const raw = expandAbbr(input);
-
-  // road
-  const roadMatch = raw.match(/^(.+?(路|街|大道|段))/);
-  const road = roadMatch ? roadMatch[1] : "";
-
-  // no
-  const noMatch = raw.match(/(\d+)(之(\d+))?號/);
-  const noMain = noMatch ? noMatch[1] : "";
-  const noSub = noMatch && noMatch[3] ? noMatch[3] : "";
-
-  // floor
-  const floorMatch = raw.match(/(\d+)樓/);
-  const floor = floorMatch ? floorMatch[1] : "";
-
-  // lane / alley (optional)
-  const laneMatch = raw.match(/(\d+)巷/);
-  const lane = laneMatch ? laneMatch[1] : "";
-  const alleyMatch = raw.match(/(\d+)弄/);
-  const alley = alleyMatch ? alleyMatch[1] : "";
-
-  return { raw, road, noMain, noSub, floor, lane, alley };
+// ====== 5) Theme ======
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem(THEME_KEY, theme);
 }
 
-function makeKey(road, noMain, noSub, floor) {
-  return `${road}|${noMain}|${noSub}|${floor}`;
-}
-function makeKeyNoFloor(road, noMain, noSub) {
-  return `${road}|${noMain}|${noSub}|`;
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved === 'light' || saved === 'dark') applyTheme(saved);
 }
 
-function isEmptyValue(v) {
-  return v === null || v === undefined || (typeof v === "string" && v.trim() === "");
+themeBtn?.addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  applyTheme(cur === 'dark' ? 'light' : 'dark');
+});
+
+// ====== 6) Modal (unlock + edit) ======
+function mountModals() {
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div id="unlockBackdrop" class="modalBackdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3>解鎖編輯模式</h3>
+        <div class="muted">輸入通關碼後，此裝置會記住（你選 B1）。</div>
+        <input id="unlockPass" class="input" type="password" placeholder="通關碼" autocomplete="current-password" />
+        <div class="row">
+          <button id="unlockCancel" class="btn" type="button">取消</button>
+          <button id="unlockOk" class="btn primary" type="button">解鎖</button>
+        </div>
+        <div id="unlockMsg" class="help"></div>
+      </div>
+    </div>
+
+    <div id="editBackdrop" class="modalBackdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3 id="editTitle">編輯資料</h3>
+
+        <div class="grid2">
+          <div>
+            <label class="label">廂號（box_no）</label>
+            <input id="fBox" class="input" placeholder="例：37" />
+          </div>
+          <div>
+            <label class="label">樓層（floor）</label>
+            <input id="fFloor" class="input" placeholder="例：2" />
+          </div>
+        </div>
+
+        <label class="label">姓名 / 公司名（borrower）</label>
+        <input id="fBorrower" class="input" placeholder="例：王小明 / XX股份有限公司" />
+
+        <label class="label">地址（address）</label>
+        <input id="fAddress" class="input" placeholder="例：新進路123號" />
+
+        <label class="label">備註（note）</label>
+        <input id="fNote" class="input" placeholder="可空" />
+
+        <label class="label">來源（source）</label>
+        <input id="fSource" class="input" placeholder="可空" />
+
+        <div class="row">
+          <button id="editCancel" class="btn" type="button">取消</button>
+          <button id="editSave" class="btn primary" type="button">儲存</button>
+        </div>
+        <div id="editMsg" class="help"></div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+}
+mountModals();
+
+const unlockBackdrop = el('unlockBackdrop');
+const unlockPass = el('unlockPass');
+const unlockCancel = el('unlockCancel');
+const unlockOk = el('unlockOk');
+const unlockMsg = el('unlockMsg');
+
+const editBackdrop = el('editBackdrop');
+const editTitle = el('editTitle');
+const fBox = el('fBox');
+const fFloor = el('fFloor');
+const fBorrower = el('fBorrower');
+const fAddress = el('fAddress');
+const fNote = el('fNote');
+const fSource = el('fSource');
+const editCancel = el('editCancel');
+const editSave = el('editSave');
+const editMsg = el('editMsg');
+
+let editingId = null;
+let editingIsNew = false;
+
+function showModal(backdropEl) {
+  backdropEl.classList.add('show');
+  backdropEl.setAttribute('aria-hidden', 'false');
+}
+function hideModal(backdropEl) {
+  backdropEl.classList.remove('show');
+  backdropEl.setAttribute('aria-hidden', 'true');
 }
 
-// ========= data =========
-let baseRecords = [];
-let customRecords = [];
-let index = new Map(); // key -> candidates
-let allPayloads = [];  // for fuzzy search
+unlockCancel?.addEventListener('click', () => hideModal(unlockBackdrop));
+editCancel?.addEventListener('click', () => hideModal(editBackdrop));
 
-async function loadBase() {
-  const res = await fetch(DATA_URL);
-  if (!res.ok) throw new Error(`底庫載入失敗：${res.status}`);
-  const data = await res.json();
-  if (!Array.isArray(data)) throw new Error("底庫不是陣列 JSON");
-  baseRecords = data;
+// ====== 7) Edit unlock ======
+function setUnlocked(on) {
+  EDIT_UNLOCKED = !!on;
+  localStorage.setItem(UNLOCK_KEY, on ? '1' : '0');
+  editModeBtn.textContent = on ? '編輯模式：已解鎖' : '編輯模式：未解鎖';
+  if (newBtn) newBtn.style.display = on ? 'inline-flex' : 'none';
+  // 重新渲染結果，讓「編輯」按鈕出現
+  if (lastResults) renderResults(lastResults);
 }
 
-function loadCustom() {
-  try {
-    const x = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
-    customRecords = Array.isArray(x) ? x : [];
-  } catch {
-    customRecords = [];
-  }
+function getSavedPass() {
+  return localStorage.getItem(PASS_KEY) || '';
 }
 
-function saveCustom() {
-  localStorage.setItem(LS_KEY, JSON.stringify(customRecords));
-}
-
-function toIntOrNull(v) {
-  const n = Number(String(v ?? "").replace(/[^\d]/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
-
-function candidateSort(list) {
-  const copy = [...list];
-
-  copy.sort((a, b) => {
-    // custom first
-    if (a.source !== b.source) return a.source === "custom" ? -1 : 1;
-
-    // box no ascending if numeric
-    const an = toIntOrNull(a.boxNo);
-    const bn = toIntOrNull(b.boxNo);
-    if (an !== null && bn !== null && an !== bn) return an - bn;
-
-    // then address string
-    return a.addrNorm.localeCompare(b.addrNorm, "zh-Hant");
+async function tryUnlock(pass) {
+  // 用一個「不改資料」的方式驗證通關碼：
+  // 這裡用 update_mailbox 對不存在 id 的更新一定會失敗。
+  // 所以我們改成呼叫 insert_mailbox 但不給必填欄位也會失敗。
+  // 最穩的方式：你在 SQL 另外做一個 check_pass(pass) RPC。
+  // 為了少一個函式，我們用 update_mailbox 對 random UUID，SQL 端會先驗 pass，再查 id；
+  // pass 不對會直接回錯。
+  const fakeId = crypto.randomUUID();
+  const { error } = await supabase.rpc(RPC_UPDATE, {
+    pass,
+    p_id: fakeId,
+    p_box_no: null,
+    p_floor: null,
+    p_borrower: null,
+    p_address: null,
+    p_note: null,
+    p_source: null,
   });
 
-  // dedupe by (source + addrNorm + boxNo)
-  const seen = new Set();
-  const out = [];
-  for (const x of copy) {
-    const k = `${x.source}|${x.addrNorm}|${x.boxNo}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(x);
-  }
-  return out;
+  // 只要不是「通關碼錯誤」就算 pass 正確；
+  // 因為 fakeId 不存在會報另一種錯。
+  if (!error) return true;
+
+  const msg = String(error.message || error);
+  if (msg.toLowerCase().includes('invalid passcode')) return false;
+  return true;
 }
 
-function rebuildIndex() {
-  index = new Map();
-  allPayloads = [];
+editModeBtn?.addEventListener('click', async () => {
+  if (EDIT_UNLOCKED) {
+    // 讓你能一鍵鎖回去
+    if (confirm('要鎖回未解鎖狀態嗎？')) {
+      setUnlocked(false);
+    }
+    return;
+  }
+  unlockMsg.textContent = '';
+  unlockPass.value = '';
+  showModal(unlockBackdrop);
+  setTimeout(() => unlockPass.focus(), 50);
+});
 
-  const all = [
-    ...baseRecords.map(r => ({ ...r, _source: "base" })),
-    ...customRecords.map(r => ({ ...r, _source: "custom" })),
+unlockOk?.addEventListener('click', async () => {
+  const pass = normInput(unlockPass.value);
+  if (!pass) {
+    unlockMsg.textContent = '請輸入通關碼';
+    return;
+  }
+  unlockMsg.textContent = '驗證中…';
+  const ok = await tryUnlock(pass);
+  if (!ok) {
+    unlockMsg.textContent = '通關碼錯誤';
+    return;
+  }
+  localStorage.setItem(PASS_KEY, pass);
+  setUnlocked(true);
+  hideModal(unlockBackdrop);
+});
+
+// ====== 8) Search mode buttons ======
+function setMode(mode) {
+  SEARCH_MODE = mode;
+  const btns = [
+    ['modeAll', 'all'],
+    ['modeAddr', 'addr'],
+    ['modeBox', 'box'],
+    ['modeBorrower', 'borrower'],
   ];
-
-  for (const r of all) {
-    // 你的 JSON 欄位：地址_norm / 地址 / display
-    const addrNorm = norm(r["地址_norm"] || r.addr_norm || r.full_address || r.address);
-    const addrRaw = norm(r["地址"] || r.addr || r.address || "");
-    const display = norm(r.display || "");
-
-    // 對於查詢展示：優先 addrNorm，沒有就 display，再沒有就 addrRaw
-    const addrForParse = addrNorm || display || addrRaw;
-
-    // 你的 JSON 已經拆好 road/no/floor，也可能有空
-    // 但我們仍做 fallback：如果缺 road/no，才用 parseAddress 從 addrForParse 抓
-    let road = norm(r.road || "");
-    let noMain = norm(r.no || "");
-    let noSub = ""; // 你的資料看起來沒拆之號，先留空
-    let floor = norm(r.floor || "");
-    let lane = norm(r.lane || "");
-    let alley = norm(r.alley || "");
-
-    if (!road || !noMain) {
-      const p = parseAddress(addrForParse);
-      road = road || p.road;
-      noMain = noMain || p.noMain;
-      noSub = noSub || p.noSub;
-      floor = floor || p.floor;
-      lane = lane || p.lane;
-      alley = alley || p.alley;
-    }
-
-    // 沒路或沒號就不做精準索引，但仍可用模糊搜尋
-    const boxNo = r.boxNo ?? r.box_no ?? r["箱號_int"] ?? r["箱號"] ?? "";
-    const note = r.note ?? r["備註"] ?? "";
-
-    const payload = {
-      source: r._source,
-      row_id: r.row_id ?? r["row_id"] ?? null,
-      boxNo: String(boxNo ?? "").trim(),
-      note: isEmptyValue(note) ? "" : String(note),
-      display: addrNorm || display || addrRaw,   // 顯示用
-      addrNorm: addrNorm || display || addrRaw,  // 統一給搜尋用
-      addrRaw,
-      road,
-      roadKey: stripRoadSuffix(road),
-      noMain,
-      noSub,
-      floor: floor.replace("樓", ""),
-      lane,
-      alley,
-      raw: r
-    };
-
-    allPayloads.push(payload);
-
-    if (!road || !noMain) continue;
-
-    const k1 = makeKey(road, noMain, noSub, payload.floor);
-    const k2 = makeKeyNoFloor(road, noMain, noSub);
-
-    if (!index.has(k1)) index.set(k1, []);
-    index.get(k1).push(payload);
-
-    if (!index.has(k2)) index.set(k2, []);
-    index.get(k2).push(payload);
+  for (const [id, m] of btns) {
+    const b = el(id);
+    if (!b) continue;
+    if (m === mode) b.classList.add('primary');
+    else b.classList.remove('primary');
   }
+}
+el('modeAll')?.addEventListener('click', () => setMode('all'));
+el('modeAddr')?.addEventListener('click', () => setMode('addr'));
+el('modeBox')?.addEventListener('click', () => setMode('box'));
+el('modeBorrower')?.addEventListener('click', () => setMode('borrower'));
+setMode('all');
 
-  // debug: 看索引是否正常建立
-  console.log("indexed payloads:", allPayloads.length, "index keys:", index.size);
+// ====== 9) Search + render ======
+let lastResults = [];
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
-// ========= fuzzy search =========
-function fuzzySearch(q, limit = 50) {
-  const query = stripRoadSuffix(expandAbbr(q));
-  if (!query) return [];
+function renderResults(rows) {
+  lastResults = Array.isArray(rows) ? rows : [];
+  resultEl.innerHTML = '';
 
-  const scored = [];
-
-  for (const x of allPayloads) {
-    const addr = x.addrNorm || "";
-    const roadKey = x.roadKey || "";
-    const box = String(x.boxNo || "");
-
-    let score = 9999;
-    let hit = false;
-
-    // road match
-    if (roadKey && roadKey === query) { score = 0; hit = true; }
-    else if (roadKey && roadKey.startsWith(query)) { score = 6; hit = true; }
-    else if (roadKey && roadKey.includes(query)) { score = 12; hit = true; }
-
-    // address contains
-    if (!hit && addr.includes(query)) { score = 20; hit = true; }
-
-    // box contains
-    if (!hit && box && box.includes(query)) { score = 25; hit = true; }
-
-    if (hit) {
-      if (x.source === "custom") score -= 2;
-      scored.push({ score, x });
-    }
-  }
-
-  scored.sort((a, b) => a.score - b.score);
-  const out = [];
-  const seen = new Set();
-
-  for (const s of scored) {
-    const k = `${s.x.source}|${s.x.addrNorm}|${s.x.boxNo}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(s.x);
-    if (out.length >= limit) break;
-  }
-
-  return candidateSort(out);
-}
-
-// ========= UI =========
-const el = (id) => document.getElementById(id);
-const statusEl = el("status");
-const resultEl = el("result");
-const qEl = el("q");
-
-// add form
-const addAddrEl = el("addAddr");
-const addBoxEl = el("addBox");
-const addNoteEl = el("addNote");
-const addMsgEl = el("addMsg");
-const customListEl = el("customList");
-
-function renderResults(list, mode, parsed) {
-  resultEl.innerHTML = "";
-
-  if (!list || list.length === 0) {
+  if (!rows || rows.length === 0) {
     resultEl.innerHTML = `
       <div class="item">
-        <b>查無結果（${mode}）</b>
-        <div class="muted">輸入：${norm(qEl.value) || "(空)"}</div>
-        ${
-          parsed
-            ? `<div class="muted">解析：${parsed.road || "?"}${parsed.noMain ? parsed.noMain+"號" : ""}${parsed.floor ? parsed.floor+"樓" : ""}</div>`
-            : ""
-        }
+        <b>查無結果</b>
+        <div class="muted">搜尋：${escapeHtml(qEl.value || '(空)')}（模式：${escapeHtml(SEARCH_MODE)}）</div>
       </div>
     `;
     return;
   }
 
-  const finalList = candidateSort(list);
+  const html = rows.map(r => {
+    const box = r.box_no ?? '';
+    const borrower = r.borrower ?? '';
+    const addr = r.address ?? '';
+    const floor = r.floor ?? '';
+    const note = r.note ?? '';
+    const source = r.source ?? '';
+    const id = r.id;
 
-  const html = finalList.map(x => `
-    <div class="item">
-      <div><b>${x.display}</b></div>
-      <div class="muted">廂號：<b>${x.boxNo || "(空)"}</b>　來源：${x.source === "custom" ? "自建" : "底庫"}</div>
-      ${x.note ? `<div class="muted">備註：${x.note}</div>` : ""}
-    </div>
-  `).join("");
+    const title1 = borrower || '(未填姓名/公司)';
+    const title2 = floor ? `${addr} ${floor}樓` : addr;
+    const subParts = [];
+    if (note) subParts.push(`備註：${escapeHtml(note)}`);
+    if (source) subParts.push(`來源：${escapeHtml(source)}`);
+
+    return `
+      <div class="item">
+        <div class="resultCard">
+          <div class="boxBadge">${escapeHtml(box || '—')}</div>
+          <div class="cardMain">
+            <div class="title">${escapeHtml(title1)}</div>
+            <div class="title">${escapeHtml(title2 || '(未填地址)')}</div>
+            ${subParts.length ? `<div class="sub">${subParts.join('　')}</div>` : `<div class="sub">&nbsp;</div>`}
+            <div class="cardActions" style="${EDIT_UNLOCKED ? '' : 'display:none;'}">
+              <button class="btn" data-edit="${escapeHtml(id)}">編輯</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
 
   resultEl.innerHTML = `
-    <div class="muted">找到 ${finalList.length} 筆（${mode}｜自建優先）</div>
+    <div class="muted">找到 ${rows.length} 筆（模式：${escapeHtml(SEARCH_MODE)}）</div>
     ${html}
   `;
-}
 
-// ====== 查詢模式：地址查 / 廂號查 ======
-let SEARCH_MODE = "addr"; // "addr" | "box"
-
-// 初始化模式按鈕（如果 HTML 還沒加按鈕，這段也不會噴錯）
-(function initSearchModeButtons() {
-  const btnAddr = el("modeAddr");
-  const btnBox = el("modeBox");
-
-  if (!btnAddr || !btnBox) return;
-
-  function setMode(mode) {
-    SEARCH_MODE = mode;
-
-    if (mode === "addr") {
-      btnAddr.classList.add("primary");
-      btnBox.classList.remove("primary");
-      qEl.placeholder = "地址查廂號：例 中山路123號2樓 / 太子R200L79A32F2";
-    } else {
-      btnBox.classList.add("primary");
-      btnAddr.classList.remove("primary");
-      qEl.placeholder = "廂號查地址：例 37（可重號，會列出多筆）";
-    }
-
-    resultEl.innerHTML = "";
-    qEl.value = "";
-  }
-
-  btnAddr.addEventListener("click", () => setMode("addr"));
-  btnBox.addEventListener("click", () => setMode("box"));
-
-  // 預設模式（配合你 HTML 一開始是地址查）
-  setMode("addr");
-})();
-
-// 廂號反查：輸入 37 → 找所有箱號=37 的地址（重號就列多筆）
-function searchByBoxNo(input) {
-  const q = norm(input);
-  const digits = q.replace(/[^\d]/g, ""); // 只留數字
-  if (!digits) return [];
-
-  // 精準比對：箱號完全等於 digits
-  const exact = allPayloads.filter(x =>
-    String(x.boxNo || "").replace(/[^\d]/g, "") === digits
-  );
-  if (exact.length > 0) return exact;
-
-  // 找不到再退一步：包含（例如輸入 3 想看 30~39 之類）
-  const contains = allPayloads.filter(x =>
-    String(x.boxNo || "").includes(digits)
-  );
-  return contains;
-}
-
-// ====== 覆蓋這個：新版 doSearch（依模式分流）======
-function doSearch() {
-  const input = qEl.value;
-
-  // ① 廂號查地址（反查）
-  if (SEARCH_MODE === "box") {
-    const list = searchByBoxNo(input);
-    const finalList = candidateSort(list); // 你原本就有：自建優先 + 去重/排序
-    renderResults(finalList, "廂號反查", null);
-    return;
-  }
-
-  // ② 地址查廂號（原本邏輯）
-  const parsed = parseAddress(input);
-
-  // 有路+號 => 優先精準
-  if (parsed.road && parsed.noMain) {
-    const k1 = makeKey(parsed.road, parsed.noMain, parsed.noSub, parsed.floor);
-    const k2 = makeKeyNoFloor(parsed.road, parsed.noMain, parsed.noSub);
-
-    const exact = index.get(k1) || [];
-    const noFloor = index.get(k2) || [];
-
-    if (exact.length > 0) {
-      renderResults(exact, "精準匹配", parsed);
-      return;
-    }
-    if (noFloor.length > 0) {
-      renderResults(noFloor, "同地址（忽略樓層）", parsed);
-      return;
-    }
-
-    // 精準找不到 -> 模糊
-    const fuzzy = fuzzySearch(input, 50);
-    renderResults(fuzzy, "模糊搜尋", parsed);
-    return;
-  }
-
-  // 沒路號（例如只打 太子 / 太子路 / 240）-> 模糊
-  const fuzzy = fuzzySearch(input, 50);
-  renderResults(fuzzy, "模糊搜尋", parsed);
-}
-
-
-// ========= add / manage custom =========
-function renderCustomList() {
-  customListEl.innerHTML = "";
-  if (customRecords.length === 0) {
-    customListEl.innerHTML = `<div class="muted">目前沒有自建資料。</div>`;
-    return;
-  }
-
-  customListEl.innerHTML = customRecords.map((r, i) => `
-    <div class="rowItem">
-      <div class="meta">
-        <div><b>${r["地址_norm"] || r.full_address || r.address || r.display || ""}</b></div>
-        <div class="muted">廂號：<b>${r["箱號_int"] ?? r.boxNo ?? ""}</b>${r["備註"] ? `　備註：${r["備註"]}` : ""}</div>
-      </div>
-      <button class="btn danger" data-del="${i}">刪除</button>
-    </div>
-  `).join("");
-
-  customListEl.querySelectorAll("button[data-del]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.del);
-      customRecords.splice(idx, 1);
-      saveCustom();
-      rebuildIndex();
-      renderCustomList();
+  if (EDIT_UNLOCKED) {
+    resultEl.querySelectorAll('button[data-edit]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-edit');
+        const row = rows.find(x => String(x.id) === String(id));
+        if (!row) return;
+        openEditModal(row);
+      });
     });
-  });
+  }
 }
 
-function addRecord() {
-  const addrInput = addAddrEl.value;
-  const boxNo = norm(addBoxEl.value);
-  const note = addNoteEl.value?.trim() || "";
+async function doSearch() {
+  const q = normInput(qEl.value);
+  setStatus('查詢中…');
 
-  if (!addrInput || !boxNo) {
-    addMsgEl.textContent = "請填地址與廂號。";
+  const { data, error } = await supabase.rpc(RPC_SEARCH, {
+    q,
+    mode: SEARCH_MODE,
+    lim: 100,
+  });
+
+  if (error) {
+    console.error(error);
+    setStatus(`查詢失敗：${error.message || error}`);
+    renderResults([]);
     return;
   }
 
-  const addrNorm = norm(expandAbbr(addrInput));
-  const p = parseAddress(addrNorm);
+  setStatus('');
+  renderResults(data || []);
+}
 
-  // 至少要能抓到路+號，否則自建也不好查
-  if (!p.road || !p.noMain) {
-    addMsgEl.textContent = "地址解析失敗：至少要有 路/街 + 門牌號（例：太子路200號）。";
+el('searchBtn')?.addEventListener('click', doSearch);
+qEl?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doSearch();
+});
+el('clearBtn')?.addEventListener('click', () => {
+  qEl.value = '';
+  setStatus('');
+  renderResults([]);
+});
+
+// ====== 10) Edit / Insert ======
+function openEditModal(row) {
+  editingIsNew = false;
+  editingId = row.id;
+  editTitle.textContent = '編輯資料';
+
+  fBox.value = row.box_no ?? '';
+  fFloor.value = row.floor ?? '';
+  fBorrower.value = row.borrower ?? '';
+  fAddress.value = row.address ?? '';
+  fNote.value = row.note ?? '';
+  fSource.value = row.source ?? '';
+
+  editMsg.textContent = '';
+  showModal(editBackdrop);
+  setTimeout(() => fBox.focus(), 50);
+}
+
+function openNewModal() {
+  editingIsNew = true;
+  editingId = null;
+  editTitle.textContent = '新增資料';
+
+  fBox.value = '';
+  fFloor.value = '';
+  fBorrower.value = '';
+  fAddress.value = '';
+  fNote.value = '';
+  fSource.value = '';
+
+  editMsg.textContent = '';
+  showModal(editBackdrop);
+  setTimeout(() => fBox.focus(), 50);
+}
+
+newBtn?.addEventListener('click', () => {
+  if (!EDIT_UNLOCKED) return;
+  openNewModal();
+});
+
+editSave?.addEventListener('click', async () => {
+  if (!EDIT_UNLOCKED) {
+    editMsg.textContent = '尚未解鎖編輯模式';
+    return;
+  }
+  const pass = getSavedPass();
+  if (!pass) {
+    editMsg.textContent = '找不到通關碼，請重新解鎖一次';
+    setUnlocked(false);
     return;
   }
 
-  // 允許同地址不同廂號，但不允許同地址同廂號重複
-  const exists = customRecords.some(x => norm(x["地址_norm"] || x.full_address) === addrNorm && String(x["箱號_int"] ?? x.boxNo) === boxNo);
-  if (exists) {
-    addMsgEl.textContent = "已存在同地址同廂號的自建資料。";
-    return;
-  }
-
-  // 你的底庫 schema：我用一樣欄位命名存
-  const rec = {
-    _source: "custom",
-    id: crypto.randomUUID(),
-    row_id: null,
-    箱號_int: Number.isFinite(Number(boxNo)) ? Number(boxNo) : boxNo,
-    display: addrNorm,
-    road: p.road,
-    section: null,
-    lane: p.lane ? Number(p.lane) : null,
-    alley: p.alley ? Number(p.alley) : null,
-    no: p.noMain,
-    floor: p.floor || null,
-    備註: note || "",
-    地址: addrNorm,
-    地址_norm: addrNorm,
-    issues: ""
+  const payload = {
+    pass,
+    p_id: editingId,
+    p_box_no: normInput(fBox.value) || null,
+    p_floor: normInput(fFloor.value) || null,
+    p_borrower: normInput(fBorrower.value) || null,
+    p_address: normInput(fAddress.value) || null,
+    p_note: normInput(fNote.value) || null,
+    p_source: normInput(fSource.value) || null,
   };
 
-  customRecords.unshift(rec);
-  saveCustom();
-  rebuildIndex();
-  renderCustomList();
-
-  addAddrEl.value = "";
-  addBoxEl.value = "";
-  addNoteEl.value = "";
-  addMsgEl.textContent = "新增完成 ✅";
-}
-
-function exportCustom() {
-  const blob = new Blob([JSON.stringify(customRecords, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "custom_records.json";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-async function importCustom(file) {
-  const text = await file.text();
-  const data = JSON.parse(text);
-  if (!Array.isArray(data)) throw new Error("檔案內容不是陣列");
-
-  // 合併去重：用 id 或 地址_norm+箱號
-  const map = new Map();
-  for (const r of customRecords) {
-    const key = r.id || `${norm(r["地址_norm"])}|${r["箱號_int"] ?? ""}`;
-    map.set(key, r);
-  }
-  for (const r of data) {
-    if (!r) continue;
-    const addrNorm = norm(r["地址_norm"] || r.full_address || r.address || r.display);
-    const box = r["箱號_int"] ?? r.boxNo ?? r["箱號"];
-    if (!addrNorm || isEmptyValue(box)) continue;
-
-    const key = r.id || `${addrNorm}|${box}`;
-    map.set(key, { ...r, _source: "custom" });
+  // 簡單必填檢查（避免空資料亂塞）
+  if (!payload.p_box_no || !payload.p_address) {
+    editMsg.textContent = '請至少填「廂號」與「地址」';
+    return;
   }
 
-  customRecords = Array.from(map.values());
-  saveCustom();
-  rebuildIndex();
-  renderCustomList();
-}
+  editMsg.textContent = '儲存中…';
 
-function wipeCustom() {
-  if (!confirm("確定要清空此台電腦的自建資料？")) return;
-  customRecords = [];
-  saveCustom();
-  rebuildIndex();
-  renderCustomList();
-}
+  const rpcName = editingIsNew ? RPC_INSERT : RPC_UPDATE;
+  const { data, error } = await supabase.rpc(rpcName, payload);
 
-// ========= theme =========
-function loadTheme() {
-  const saved = localStorage.getItem(THEME_KEY);
-  const theme = saved || "dark";
-  document.documentElement.setAttribute("data-theme", theme);
-}
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute("data-theme") || "dark";
-  const next = cur === "dark" ? "light" : "dark";
-  document.documentElement.setAttribute("data-theme", next);
-  localStorage.setItem(THEME_KEY, next);
-}
+  if (error) {
+    console.error(error);
+    editMsg.textContent = `儲存失敗：${error.message || error}`;
+    if (String(error.message || '').toLowerCase().includes('invalid passcode')) {
+      setUnlocked(false);
+      localStorage.removeItem(PASS_KEY);
+    }
+    return;
+  }
 
-// ========= init =========
-async function init() {
-  loadTheme();
-  statusEl.textContent = "載入中…";
-
-  await loadBase();
-  loadCustom();
-  rebuildIndex();
-  renderCustomList();
-
-  statusEl.textContent = `底庫 ${baseRecords.length} 筆，自建 ${customRecords.length} 筆（可新增）`;
-}
-
-el("searchBtn").addEventListener("click", doSearch);
-el("clearBtn").addEventListener("click", () => { qEl.value = ""; resultEl.innerHTML = ""; });
-qEl.addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
-
-el("addBtn").addEventListener("click", addRecord);
-
-el("exportBtn").addEventListener("click", exportCustom);
-el("importFile").addEventListener("change", async (e) => {
-  const f = e.target.files?.[0];
-  if (!f) return;
-  try { await importCustom(f); }
-  catch (err) { alert("匯入失敗：" + err.message); }
-  finally { e.target.value = ""; }
+  editMsg.textContent = '已儲存 ✅';
+  hideModal(editBackdrop);
+  // 重新查詢（保證列表更新）
+  await doSearch();
 });
-el("wipeBtn").addEventListener("click", wipeCustom);
 
-el("themeBtn").addEventListener("click", toggleTheme);
+// ====== 11) boot ======
+function boot() {
+  initTheme();
 
-init().catch(err => {
-  statusEl.textContent = "初始化失敗：" + err.message;
-  console.error(err);
-});
+  const unlocked = localStorage.getItem(UNLOCK_KEY) === '1';
+  const pass = getSavedPass();
+  setUnlocked(unlocked && !!pass);
+
+  // 初始跑一次（空字串會由 SQL 決定要不要回最新 N 筆）
+  doSearch();
+}
+
+boot();
