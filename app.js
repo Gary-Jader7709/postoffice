@@ -11,6 +11,7 @@ const SUPABASE_ANON_KEY = 'sb_publishable_wF1Vq7wOdv2EOQUPWSULcA_MtAhFf7X';
 const RPC_SEARCH = 'search_mailboxes';
 const RPC_UPDATE = 'update_mailbox';
 const RPC_INSERT = 'insert_mailbox';
+const RPC_DELETE = 'delete_mailbox';
 
 // ====== 2) localStorage keys ======
 const THEME_KEY = 'po_theme_v1';
@@ -107,6 +108,7 @@ function mountModals() {
 
         <div class="row">
           <button id="editCancel" class="btn" type="button">取消</button>
+          <button id="editDelete" class="btn danger" type="button">刪除</button>
           <button id="editSave" class="btn primary" type="button">儲存</button>
         </div>
         <div id="editMsg" class="help"></div>
@@ -133,6 +135,7 @@ const fNote = el('fNote');
 const fSource = el('fSource');
 const editCancel = el('editCancel');
 const editSave = el('editSave');
+const editDelete = el('editDelete');
 const editMsg = el('editMsg');
 
 let editingId = null;
@@ -356,6 +359,7 @@ function openEditModal(row) {
   editingIsNew = false;
   editingId = row.id;
   editTitle.textContent = '編輯資料';
+  if (editDelete) editDelete.style.display = '';
 
   fBox.value = row.box_no ?? '';
   fFloor.value = row.floor ?? '';
@@ -373,6 +377,7 @@ function openNewModal() {
   editingIsNew = true;
   editingId = null;
   editTitle.textContent = '新增資料';
+  if (editDelete) editDelete.style.display = 'none';
 
   fBox.value = '';
   fFloor.value = '';
@@ -440,6 +445,42 @@ editSave?.addEventListener('click', async () => {
   // 重新查詢（保證列表更新）
   await doSearch();
 });
+
+// ====== 10.5) Delete (only when unlocked + editing existing) ======
+editDelete?.addEventListener('click', async () => {
+  if (!EDIT_UNLOCKED) {
+    editMsg.textContent = '尚未解鎖編輯模式';
+    return;
+  }
+  if (!editingId || editingIsNew) return;
+
+  if (!confirm('確定要刪除這筆資料嗎？刪除後無法復原。')) return;
+
+  const pass = getSavedPass();
+  if (!pass) {
+    editMsg.textContent = '找不到通關碼，請重新解鎖一次';
+    setUnlocked(false);
+    return;
+  }
+
+  editMsg.textContent = '刪除中…';
+  const { error } = await supabase.rpc(RPC_DELETE, { pass, p_id: editingId });
+
+  if (error) {
+    console.error(error);
+    editMsg.textContent = `刪除失敗：${error.message || error}`;
+    if (String(error.message || '').toLowerCase().includes('invalid passcode')) {
+      setUnlocked(false);
+      localStorage.removeItem(PASS_KEY);
+    }
+    return;
+  }
+
+  hideModal(editBackdrop);
+  setStatus('已刪除 ✅');
+  await doSearch();
+});
+
 
 // ====== 11) boot ======
 function boot() {
